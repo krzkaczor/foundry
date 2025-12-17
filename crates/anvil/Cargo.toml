@@ -86,6 +86,7 @@ futures.workspace = true
 async-trait.workspace = true
 
 # misc
+uuid.workspace = true
 flate2.workspace = true
 serde_json.workspace = true
 serde.workspace = true

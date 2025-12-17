@@ -136,6 +136,7 @@ use std::{
 };
 use storage::{Blockchain, DEFAULT_HISTORY_LIMIT, MinedTransaction};
 use tokio::sync::RwLock as AsyncRwLock;
+use uuid::Uuid;
 
 pub mod cache;
 pub mod fork_db;
@@ -250,6 +251,11 @@ pub struct Backend {
 }
 
 impl Backend {
+    #[inline]
+    fn new_db_lock_request_id() -> Uuid {
+        Uuid::new_v4()
+    }
+
     /// Initialises the balance of the given accounts
     #[expect(clippy::too_many_arguments)]
     pub async fn with_genesis(
@@ -1024,13 +1030,37 @@ impl Backend {
             None
         };
 
-        let state = self.db.read().await.dump_state(
-            at,
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "read",
+            context = "serialized_state",
             best_number,
-            blocks,
-            transactions,
-            historical_states,
-        )?;
+        );
+        let state = {
+            let db = self.db.read().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "read",
+                context = "serialized_state",
+                best_number,
+            );
+            let dump = db.dump_state(at, best_number, blocks, transactions, historical_states);
+            drop(db);
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "read",
+                context = "serialized_state",
+                best_number,
+            );
+            dump
+        }?;
         state.ok_or_else(|| {
             RpcError::invalid_params("Dumping state not supported with the current configuration")
                 .into()
@@ -1125,7 +1155,40 @@ impl Backend {
             ));
         }
 
-        if !self.db.write().await.load_state(state.clone())? {
+        let lock_request_id = Self::new_db_lock_request_id();
+        let block_count = state.blocks.len();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "write",
+            context = "load_state",
+            block_count,
+        );
+        let loaded = {
+            let mut db = self.db.write().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "write",
+                context = "load_state",
+                block_count,
+            );
+            let result = db.load_state(state.clone());
+            drop(db);
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "write",
+                context = "load_state",
+                block_count,
+            );
+            result
+        }?;
+
+        if !loaded {
             return Err(RpcError::invalid_params(
                 "Loading state not supported with the current configuration",
             )
@@ -1270,34 +1333,65 @@ impl Backend {
     where
         F: FnOnce(Box<dyn MaybeFullDatabase + '_>, BlockInfo) -> T,
     {
-        let db = self.db.read().await;
         let env = self.next_env();
+        let pool_len = pool_transactions.len();
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "read",
+            context = "with_pending_block",
+            pool_size = pool_len,
+        );
 
-        let mut cache_db = CacheDB::new(&*db);
+        let result = {
+            let db = self.db.read().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "read",
+                context = "with_pending_block",
+                pool_size = pool_len,
+            );
 
-        let storage = self.blockchain.storage.read();
+            let mut cache_db = CacheDB::new(&*db);
 
-        let executor = TransactionExecutor {
-            db: &mut cache_db,
-            validator: self,
-            pending: pool_transactions.into_iter(),
-            evm_env: env.evm_env,
-            parent_hash: storage.best_hash,
-            gas_used: 0,
-            blob_gas_used: 0,
-            enable_steps_tracing: self.enable_steps_tracing,
-            print_logs: self.print_logs,
-            print_traces: self.print_traces,
-            call_trace_decoder: self.call_trace_decoder.clone(),
-            precompile_factory: self.precompile_factory.clone(),
-            networks: self.env.read().networks,
-            blob_params: self.blob_params(),
-            cheats: self.cheats().clone(),
+            let storage = self.blockchain.storage.read();
+
+            let executor = TransactionExecutor {
+                db: &mut cache_db,
+                validator: self,
+                pending: pool_transactions.into_iter(),
+                evm_env: env.evm_env,
+                parent_hash: storage.best_hash,
+                gas_used: 0,
+                blob_gas_used: 0,
+                enable_steps_tracing: self.enable_steps_tracing,
+                print_logs: self.print_logs,
+                print_traces: self.print_traces,
+                call_trace_decoder: self.call_trace_decoder.clone(),
+                precompile_factory: self.precompile_factory.clone(),
+                networks: self.env.read().networks,
+                blob_params: self.blob_params(),
+                cheats: self.cheats().clone(),
+            };
+
+            let executed = executor.execute();
+            f(Box::new(cache_db), executed.block)
         };
 
-        // create a new pending block
-        let executed = executor.execute();
-        f(Box::new(cache_db), executed.block)
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "released",
+            lock = "read",
+            context = "with_pending_block",
+            pool_size = pool_len,
+        );
+
+        result
     }
 
     /// Mines a new block and stores it.
@@ -2514,9 +2608,39 @@ impl Backend {
             ));
         }
 
-        let db = self.db.read().await;
-        let block = self.env.read().evm_env.block_env.clone();
-        Ok(f(Box::new(&**db), block))
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "read",
+            context = "with_database_at",
+            block_number,
+        );
+        let output = {
+            let db = self.db.read().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "read",
+                context = "with_database_at",
+                block_number,
+            );
+            let block = self.env.read().evm_env.block_env.clone();
+            let value = f(Box::new(&**db), block);
+            drop(db);
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "read",
+                context = "with_database_at",
+                block_number,
+            );
+            value
+        };
+        Ok(output)
     }
 
     pub async fn storage_at(
@@ -2847,7 +2971,39 @@ impl Backend {
         code_hash: B256,
         block_id: Option<BlockId>,
     ) -> Result<Option<Bytes>, BlockchainError> {
-        if let Ok(code) = self.db.read().await.code_by_hash_ref(code_hash) {
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "read",
+            context = "debug_code_by_hash",
+            %code_hash,
+        );
+        let local_code = {
+            let db = self.db.read().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "read",
+                context = "debug_code_by_hash",
+                %code_hash,
+            );
+            let result = db.code_by_hash_ref(code_hash);
+            drop(db);
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "read",
+                context = "debug_code_by_hash",
+                %code_hash,
+            );
+            result
+        };
+
+        if let Ok(code) = local_code {
             return Ok(Some(code.original_bytes()));
         }
         if let Some(fork) = self.get_fork() {
