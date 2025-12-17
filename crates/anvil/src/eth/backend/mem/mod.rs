@@ -431,27 +431,108 @@ impl Backend {
 
             let genesis_accounts = futures::future::join_all(genesis_accounts_futures).await;
 
-            let mut db = self.db.write().await;
+            let account_count = self.genesis.accounts.len();
+            let lock_request_id = Self::new_db_lock_request_id();
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquiring",
+                lock = "write",
+                context = "apply_genesis_fork_accounts",
+                account_count,
+            );
+            {
+                let mut db = self.db.write().await;
+                trace!(
+                    target: "backend::db_lock",
+                    %lock_request_id,
+                    action = "acquired",
+                    lock = "write",
+                    context = "apply_genesis_fork_accounts",
+                    account_count,
+                );
 
-            for res in genesis_accounts {
-                let (address, mut info) = res.unwrap()?;
-                info.balance = self.genesis.balance;
-                db.insert_account(address, info.clone());
+                for res in genesis_accounts {
+                    let (address, mut info) = res.unwrap()?;
+                    info.balance = self.genesis.balance;
+                    db.insert_account(address, info.clone());
+                }
             }
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "write",
+                context = "apply_genesis_fork_accounts",
+                account_count,
+            );
         } else {
-            let mut db = self.db.write().await;
-            for (account, info) in self.genesis.account_infos() {
-                db.insert_account(account, info);
-            }
+            let account_infos: Vec<_> = self.genesis.account_infos().collect();
+            let account_count = account_infos.len();
+            let lock_request_id = Self::new_db_lock_request_id();
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquiring",
+                lock = "write",
+                context = "apply_genesis_in_memory_accounts",
+                account_count,
+            );
+            {
+                let mut db = self.db.write().await;
+                trace!(
+                    target: "backend::db_lock",
+                    %lock_request_id,
+                    action = "acquired",
+                    lock = "write",
+                    context = "apply_genesis_in_memory_accounts",
+                    account_count,
+                );
+                for (account, info) in account_infos {
+                    db.insert_account(account, info);
+                }
 
-            // insert the new genesis hash to the database so it's available for the next block in
-            // the evm
-            db.insert_block_hash(U256::from(self.best_number()), self.best_hash());
+                // insert the new genesis hash to the database so it's available for the next block in
+                // the evm
+                db.insert_block_hash(U256::from(self.best_number()), self.best_hash());
+            }
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "write",
+                context = "apply_genesis_in_memory_accounts",
+                account_count,
+            );
         }
 
-        let db = self.db.write().await;
-        // apply the genesis.json alloc
-        self.genesis.apply_genesis_json_alloc(db)?;
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "write",
+            context = "apply_genesis_alloc",
+        );
+        {
+            let db = self.db.write().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "write",
+                context = "apply_genesis_alloc",
+            );
+            // apply the genesis.json alloc
+            self.genesis.apply_genesis_json_alloc(db)?;
+        }
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "released",
+            lock = "write",
+            context = "apply_genesis_alloc",
+        );
 
         trace!(target: "backend", "set genesis balances");
 
@@ -495,7 +576,38 @@ impl Backend {
 
     /// Returns the `AccountInfo` from the database
     pub async fn get_account(&self, address: Address) -> DatabaseResult<AccountInfo> {
-        Ok(self.db.read().await.basic_ref(address)?.unwrap_or_default())
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "read",
+            context = "get_account",
+            %address,
+        );
+        let result = {
+            let db = self.db.read().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "read",
+                context = "get_account",
+                %address,
+            );
+            let account = db.basic_ref(address)?.unwrap_or_default();
+            drop(db);
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "read",
+                context = "get_account",
+                %address,
+            );
+            account
+        };
+        Ok(result)
     }
 
     /// Whether we're forked off some remote client
@@ -519,7 +631,32 @@ impl Backend {
                     node_config.setup_fork_db_config(eth_rpc_url, &mut env, &self.fees).await?
                 };
 
-                *self.db.write().await = Box::new(db);
+                let lock_request_id = Self::new_db_lock_request_id();
+                trace!(
+                    target: "backend::db_lock",
+                    %lock_request_id,
+                    action = "acquiring",
+                    lock = "write",
+                    context = "reset_fork_replace_db",
+                );
+                {
+                    let mut db_guard = self.db.write().await;
+                    trace!(
+                        target: "backend::db_lock",
+                        %lock_request_id,
+                        action = "acquired",
+                        lock = "write",
+                        context = "reset_fork_replace_db",
+                    );
+                    *db_guard = Box::new(db);
+                }
+                trace!(
+                    target: "backend::db_lock",
+                    %lock_request_id,
+                    action = "released",
+                    lock = "write",
+                    context = "reset_fork_replace_db",
+                );
 
                 let fork = ClientFork::new(config, Arc::clone(&self.db));
 
@@ -597,7 +734,32 @@ impl Backend {
                 fork.total_difficulty(),
             );
             self.states.write().clear();
-            self.db.write().await.clear();
+            let lock_request_id = Self::new_db_lock_request_id();
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquiring",
+                lock = "write",
+                context = "reset_fork_clear_db",
+            );
+            {
+                let mut db = self.db.write().await;
+                trace!(
+                    target: "backend::db_lock",
+                    %lock_request_id,
+                    action = "acquired",
+                    lock = "write",
+                    context = "reset_fork_clear_db",
+                );
+                db.clear();
+            }
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "write",
+                context = "reset_fork_clear_db",
+            );
 
             self.apply_genesis().await?;
 
@@ -637,7 +799,32 @@ impl Backend {
         self.states.write().clear();
 
         // Clear the database
-        self.db.write().await.clear();
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "write",
+            context = "reset_to_in_mem_clear_db",
+        );
+        {
+            let mut db = self.db.write().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "write",
+                context = "reset_to_in_mem_clear_db",
+            );
+            db.clear();
+        }
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "released",
+            lock = "write",
+            context = "reset_to_in_mem_clear_db",
+        );
 
         // Reset time manager
         self.time.reset(genesis_timestamp);
@@ -669,7 +856,32 @@ impl Backend {
         let (forked_db, client_fork_config) =
             node_config.setup_fork_db_config(fork_url, &mut env, &self.fees).await?;
 
-        *self.db.write().await = Box::new(forked_db);
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "write",
+            context = "reset_block_number_replace_db",
+        );
+        {
+            let mut db = self.db.write().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "write",
+                context = "reset_block_number_replace_db",
+            );
+            *db = Box::new(forked_db);
+        }
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "released",
+            lock = "write",
+            context = "reset_block_number_replace_db",
+        );
         let fork = ClientFork::new(client_fork_config, Arc::clone(&self.db));
         *self.fork.write() = Some(fork);
         *self.env.write() = env;
@@ -756,17 +968,116 @@ impl Backend {
 
     /// Sets the nonce of the given address
     pub async fn set_nonce(&self, address: Address, nonce: U256) -> DatabaseResult<()> {
-        self.db.write().await.set_nonce(address, nonce.try_into().unwrap_or(u64::MAX))
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "write",
+            context = "set_nonce",
+            %address,
+            %nonce,
+        );
+        let result = {
+            let mut db = self.db.write().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "write",
+                context = "set_nonce",
+                %address,
+                %nonce,
+            );
+            let res = db.set_nonce(address, nonce.try_into().unwrap_or(u64::MAX));
+            drop(db);
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "write",
+                context = "set_nonce",
+                %address,
+                %nonce,
+            );
+            res
+        };
+        result
     }
 
     /// Sets the balance of the given address
     pub async fn set_balance(&self, address: Address, balance: U256) -> DatabaseResult<()> {
-        self.db.write().await.set_balance(address, balance)
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "write",
+            context = "set_balance",
+            %address,
+            %balance,
+        );
+        let result = {
+            let mut db = self.db.write().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "write",
+                context = "set_balance",
+                %address,
+                %balance,
+            );
+            let res = db.set_balance(address, balance);
+            drop(db);
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "write",
+                context = "set_balance",
+                %address,
+                %balance,
+            );
+            res
+        };
+        result
     }
 
     /// Sets the code of the given address
     pub async fn set_code(&self, address: Address, code: Bytes) -> DatabaseResult<()> {
-        self.db.write().await.set_code(address, code)
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "write",
+            context = "set_code",
+            %address,
+        );
+        let result = {
+            let mut db = self.db.write().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "write",
+                context = "set_code",
+                %address,
+            );
+            let res = db.set_code(address, code);
+            drop(db);
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "write",
+                context = "set_code",
+                %address,
+            );
+            res
+        };
+        result
     }
 
     /// Sets the value for the given slot of the given address
@@ -776,7 +1087,41 @@ impl Backend {
         slot: U256,
         val: B256,
     ) -> DatabaseResult<()> {
-        self.db.write().await.set_storage_at(address, slot.into(), val)
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "write",
+            context = "set_storage_at",
+            %address,
+            %slot,
+        );
+        let result = {
+            let mut db = self.db.write().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "write",
+                context = "set_storage_at",
+                %address,
+                %slot,
+            );
+            let res = db.set_storage_at(address, slot.into(), val);
+            drop(db);
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "write",
+                context = "set_storage_at",
+                %address,
+                %slot,
+            );
+            res
+        };
+        result
     }
 
     /// Returns the configured specid
@@ -958,7 +1303,37 @@ impl Backend {
     pub async fn create_state_snapshot(&self) -> U256 {
         let num = self.best_number();
         let hash = self.best_hash();
-        let id = self.db.write().await.snapshot_state();
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "write",
+            context = "create_state_snapshot",
+            block_number = num,
+        );
+        let id = {
+            let mut db = self.db.write().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "write",
+                context = "create_state_snapshot",
+                block_number = num,
+            );
+            let snapshot_id = db.snapshot_state();
+            drop(db);
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "write",
+                context = "create_state_snapshot",
+                block_number = num,
+            );
+            snapshot_id
+        };
         trace!(target: "backend", "creating snapshot {} at {}", id, num);
         self.active_state_snapshots.lock().insert(id, (num, hash));
         id
@@ -1008,7 +1383,39 @@ impl Backend {
                 ..Default::default()
             }
         }
-        Ok(self.db.write().await.revert_state(id, RevertStateSnapshotAction::RevertRemove))
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "write",
+            context = "revert_state_snapshot",
+            snapshot_id = %id,
+        );
+        let result = {
+            let mut db = self.db.write().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "write",
+                context = "revert_state_snapshot",
+                snapshot_id = %id,
+            );
+            let revert =
+                db.revert_state(id, RevertStateSnapshotAction::RevertRemove);
+            drop(db);
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "write",
+                context = "revert_state_snapshot",
+                snapshot_id = %id,
+            );
+            revert
+        };
+        Ok(result)
     }
 
     pub fn list_state_snapshots(&self) -> BTreeMap<U256, (u64, B256)> {
@@ -1288,10 +1695,45 @@ impl Backend {
                 Some(alloy_rlp::encode(tx.pending_transaction.transaction.as_ref()).into());
         }
 
-        let db = self.db.read().await;
-        let mut inspector = self.build_inspector();
-        let mut evm = self.new_evm_with_inspector_ref(&**db, &env, &mut inspector);
-        let ResultAndState { result, state } = evm.transact(env.tx)?;
+        let lock_request_id = Self::new_db_lock_request_id();
+        trace!(
+            target: "backend::db_lock",
+            %lock_request_id,
+            action = "acquiring",
+            lock = "read",
+            context = "inspect_tx",
+            tx_hash = ?tx.hash(),
+        );
+        let result_and_state = {
+            let db = self.db.read().await;
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquired",
+                lock = "read",
+                context = "inspect_tx",
+                tx_hash = ?tx.hash(),
+            );
+            let mut inspector = self.build_inspector();
+            let mut evm = self.new_evm_with_inspector_ref(&**db, &env, &mut inspector);
+            let result = evm.transact(env.tx)?;
+            drop(evm);
+            inspector.print_logs();
+
+            if self.print_traces {
+                inspector.print_traces(self.call_trace_decoder.clone());
+            }
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "released",
+                lock = "read",
+                context = "inspect_tx",
+                tx_hash = ?tx.hash(),
+            );
+            result
+        };
+        let ResultAndState { result, state } = result_and_state;
         let (exit_reason, gas_used, out, logs) = match result {
             ExecutionResult::Success { reason, gas_used, logs, output, .. } => {
                 (reason.into(), gas_used, Some(output), Some(logs))
@@ -1304,13 +1746,6 @@ impl Backend {
                 (eth_reason, gas_used, None, None)
             }
         };
-
-        drop(evm);
-        inspector.print_logs();
-
-        if self.print_traces {
-            inspector.print_traces(self.call_trace_decoder.clone());
-        }
 
         Ok((exit_reason, out, gas_used, state, logs.unwrap_or_default()))
     }
@@ -1450,49 +1885,109 @@ impl Backend {
             env.evm_env.block_env.prevrandao = Some(keccak256(&input));
 
             if self.prune_state_history_config.is_state_history_supported() {
-                let db = self.db.read().await.current_state();
+                let lock_request_id = Self::new_db_lock_request_id();
+                trace!(
+                    target: "backend::db_lock",
+                    %lock_request_id,
+                    action = "acquiring",
+                    lock = "read",
+                    context = "mine_block_store_state",
+                    %best_hash,
+                );
+                let state_snapshot = {
+                    let db = self.db.read().await;
+                    trace!(
+                        target: "backend::db_lock",
+                        %lock_request_id,
+                        action = "acquired",
+                        lock = "read",
+                        context = "mine_block_store_state",
+                        %best_hash,
+                    );
+                    let snapshot = db.current_state();
+                    drop(db);
+                    trace!(
+                        target: "backend::db_lock",
+                        %lock_request_id,
+                        action = "released",
+                        lock = "read",
+                        context = "mine_block_store_state",
+                        %best_hash,
+                    );
+                    snapshot
+                };
                 // store current state before executing all transactions
-                self.states.write().insert(best_hash, db);
+                self.states.write().insert(best_hash, state_snapshot);
             }
 
             trace!(target: "backend", "HERE 5");
 
             let (executed_tx, block_hash) = {
-                trace!(target: "backend", "before self.db.write.await");
-                let mut db = self.db.write().await;
-                trace!(target: "backend", "after self.db.write.await");
+                let lock_request_id = Self::new_db_lock_request_id();
+                trace!(
+                    target: "backend::db_lock",
+                    %lock_request_id,
+                    action = "acquiring",
+                    lock = "write",
+                    context = "mine_block_execute",
+                    block_number,
+                );
+                let result = {
+                    let mut db = self.db.write().await;
+                    trace!(
+                        target: "backend::db_lock",
+                        %lock_request_id,
+                        action = "acquired",
+                        lock = "write",
+                        context = "mine_block_execute",
+                        block_number,
+                    );
 
-                // finally set the next block timestamp, this is done just before execution, because
-                // there can be concurrent requests that can delay acquiring the db lock and we want
-                // to ensure the timestamp is as close as possible to the actual execution.
-                env.evm_env.block_env.timestamp = U256::from(self.time.next_timestamp());
+                    // finally set the next block timestamp, this is done just before execution, because
+                    // there can be concurrent requests that can delay acquiring the db lock and we want
+                    // to ensure the timestamp is as close as possible to the actual execution.
+                    env.evm_env.block_env.timestamp = U256::from(self.time.next_timestamp());
 
-                let executor = TransactionExecutor {
-                    db: &mut **db,
-                    validator: self,
-                    pending: pool_transactions.into_iter(),
-                    evm_env: env.evm_env.clone(),
-                    parent_hash: best_hash,
-                    gas_used: 0,
-                    blob_gas_used: 0,
-                    enable_steps_tracing: self.enable_steps_tracing,
-                    print_logs: self.print_logs,
-                    print_traces: self.print_traces,
-                    call_trace_decoder: self.call_trace_decoder.clone(),
-                    networks: self.env.read().networks,
-                    precompile_factory: self.precompile_factory.clone(),
-                    blob_params: self.blob_params(),
-                    cheats: self.cheats().clone(),
+                    let executor = TransactionExecutor {
+                        db: &mut **db,
+                        validator: self,
+                        pending: pool_transactions.into_iter(),
+                        evm_env: env.evm_env.clone(),
+                        parent_hash: best_hash,
+                        gas_used: 0,
+                        blob_gas_used: 0,
+                        enable_steps_tracing: self.enable_steps_tracing,
+                        print_logs: self.print_logs,
+                        print_traces: self.print_traces,
+                        call_trace_decoder: self.call_trace_decoder.clone(),
+                        networks: self.env.read().networks,
+                        precompile_factory: self.precompile_factory.clone(),
+                        blob_params: self.blob_params(),
+                        cheats: self.cheats().clone(),
+                    };
+                    trace!(target: "backend", "before executor.execute");
+                    let executed_tx = executor.execute();
+                    trace!(target: "backend", "after executor.execute");
+
+                    // we also need to update the new blockhash in the db itself
+                    let block_hash =
+                        executed_tx.block.block.header.hash_slow();
+                    db.insert_block_hash(
+                        U256::from(executed_tx.block.block.header.number),
+                        block_hash,
+                    );
+
+                    (executed_tx, block_hash)
                 };
-                trace!(target: "backend", "before executor.execute");
-                let executed_tx = executor.execute();
-                trace!(target: "backend", "after executor.execute");
-
-                // we also need to update the new blockhash in the db itself
-                let block_hash = executed_tx.block.block.header.hash_slow();
-                db.insert_block_hash(U256::from(executed_tx.block.block.header.number), block_hash);
-
-                (executed_tx, block_hash)
+                trace!(
+                    target: "backend::db_lock",
+                    %lock_request_id,
+                    action = "released",
+                    lock = "write",
+                    context = "mine_block_execute",
+                    block_number,
+                );
+                result
             };
             trace!(target: "backend", "DONE");
 
@@ -3652,14 +4147,46 @@ impl Backend {
         };
 
         {
+            let account_count = common_state.len();
             // Set state to common state
-            self.db.write().await.clear();
-            for (address, acc) in common_state {
-                for (key, value) in acc.storage {
-                    self.db.write().await.set_storage_at(address, key.into(), value.into())?;
+            let lock_request_id = Self::new_db_lock_request_id();
+            trace!(
+                target: "backend::db_lock",
+                %lock_request_id,
+                action = "acquiring",
+                lock = "write",
+                context = "rollback_common_state",
+                account_count,
+            );
+            let result = {
+                let mut db = self.db.write().await;
+                trace!(
+                    target: "backend::db_lock",
+                    %lock_request_id,
+                    action = "acquired",
+                    lock = "write",
+                    context = "rollback_common_state",
+                    account_count,
+                );
+                db.clear();
+                for (address, acc) in common_state {
+                    for (key, value) in acc.storage {
+                        db.set_storage_at(address, key.into(), value.into())?;
+                    }
+                    db.insert_account(address, acc.info);
                 }
-                self.db.write().await.insert_account(address, acc.info);
-            }
+                drop(db);
+                trace!(
+                    target: "backend::db_lock",
+                    %lock_request_id,
+                    action = "released",
+                    lock = "write",
+                    context = "rollback_common_state",
+                    account_count,
+                );
+                Ok::<_, BlockchainError>(())
+            };
+            result?;
         }
 
         {
