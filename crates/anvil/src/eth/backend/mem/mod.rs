@@ -1364,7 +1364,9 @@ impl Backend {
             trace!(target: "backend", "HERE 5");
 
             let (executed_tx, block_hash) = {
+                trace!(target: "backend", "before self.db.write.await");
                 let mut db = self.db.write().await;
+                trace!(target: "backend", "after self.db.write.await");
 
                 // finally set the next block timestamp, this is done just before execution, because
                 // there can be concurrent requests that can delay acquiring the db lock and we want
@@ -1388,7 +1390,9 @@ impl Backend {
                     blob_params: self.blob_params(),
                     cheats: self.cheats().clone(),
                 };
+                trace!(target: "backend", "before executor.execute");
                 let executed_tx = executor.execute();
+                trace!(target: "backend", "after executor.execute");
 
                 // we also need to update the new blockhash in the db itself
                 let block_hash = executed_tx.block.block.header.hash_slow();
@@ -1396,7 +1400,7 @@ impl Backend {
 
                 (executed_tx, block_hash)
             };
-            trace!(target: "backend", "HERE 6");
+            trace!(target: "backend", "DONE");
 
             // create the new block with the current timestamp
             let ExecutedTransactions { block, included, invalid } = executed_tx;
