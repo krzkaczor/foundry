@@ -68,17 +68,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  release-docker:
-    name: Release Docker
-    needs: prepare
-    uses: ./.github/workflows/docker-publish.yml
-    permissions:
-      contents: read
-      id-token: write
-      packages: write
-    with:
-      tag_name: ${{ needs.prepare.outputs.tag_name }}
-
   release:
     permissions:
       id-token: write
