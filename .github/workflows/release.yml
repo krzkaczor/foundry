@@ -3,19 +3,11 @@ name: release
 permissions: {}
 
 on:
-  push:
-    tags:
-      - "stable"
-      - "rc"
-      - "rc-*"
-      - "v*.*.*"
-  schedule:
-    - cron: "0 6 * * *"
-  workflow_dispatch:
+  pull_request:
 
 env:
   CARGO_TERM_COLOR: always
-  IS_NIGHTLY: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+  IS_NIGHTLY: true
 
   # Keep in sync with `docker-publish.yml`.
   RUST_PROFILE: maxperf
@@ -76,17 +68,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  release-docker:
-    name: Release Docker
-    needs: prepare
-    uses: ./.github/workflows/docker-publish.yml
-    permissions:
-      contents: read
-      id-token: write
-      packages: write
-    with:
-      tag_name: ${{ needs.prepare.outputs.tag_name }}
-
   release:
     permissions:
       id-token: write
@@ -105,41 +86,41 @@ jobs:
           # `platform` and `arch`: Used in tarball names
           # `svm`: target platform to use for the Solc binary: https://github.com/roynalnaruto/svm-rs/blob/84cbe0ac705becabdc13168bae28a45ad2299749/svm-builds/build.rs#L4-L24
           # These are pinned to the oldest runner versions to support old libc/SDK versions.
-          - runner: depot-ubuntu-22.04-16
+          - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             svm_target_platform: linux-amd64
             platform: linux
             arch: amd64
-          - runner: depot-ubuntu-22.04-16
+          - runner: ubuntu-22.04
             target: x86_64-unknown-linux-musl
             svm_target_platform: linux-amd64
             platform: alpine
             arch: amd64
-          - runner: depot-ubuntu-22.04-arm-16
+          - runner: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             svm_target_platform: linux-aarch64
             platform: linux
             arch: arm64
-          - runner: depot-ubuntu-22.04-16
+          - runner: ubuntu-22.04
             target: aarch64-unknown-linux-musl
             svm_target_platform: linux-aarch64
             platform: alpine
             arch: arm64
-          - runner: macos-14-large
-            target: x86_64-apple-darwin
-            svm_target_platform: macosx-amd64
-            platform: darwin
-            arch: amd64
-          - runner: macos-latest-large
-            target: aarch64-apple-darwin
-            svm_target_platform: macosx-aarch64
-            platform: darwin
-            arch: arm64
-          - runner: depot-windows-latest-16
-            target: x86_64-pc-windows-msvc
-            svm_target_platform: windows-amd64
-            platform: win32
-            arch: amd64
+          # - runner: macos-14-large
+          #   target: x86_64-apple-darwin
+          #   svm_target_platform: macosx-amd64
+          #   platform: darwin
+          #   arch: amd64
+          # - runner: macos-latest-large
+          #   target: aarch64-apple-darwin
+          #   svm_target_platform: macosx-aarch64
+          #   platform: darwin
+          #   arch: arm64
+          # - runner: depot-windows-latest-16
+          #   target: x86_64-pc-windows-msvc
+          #   svm_target_platform: windows-amd64
+          #   platform: win32
+          #   arch: amd64
     steps:
       - uses: actions/checkout@v6
         with:
@@ -334,24 +315,24 @@ jobs:
             const prunePrereleases = require('./.github/scripts/prune-prereleases.js')
             await prunePrereleases({github, context})
 
-  # If any of the jobs fail, this will create a high-priority issue to signal so.
-  issue:
-    name: Open an issue
-    runs-on: ubuntu-latest
-    needs: [prepare, release-docker, release, cleanup]
-    if: failure()
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: JasonEtco/create-an-issue@1b14a70e4d8dc185e5cc76d3bec9eab20257b2c5 # v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WORKFLOW_URL: |
-            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        with:
-          update_existing: true
-          filename: .github/RELEASE_FAILURE_ISSUE_TEMPLATE.md
+  # # If any of the jobs fail, this will create a high-priority issue to signal so.
+  # issue:
+  #   name: Open an issue
+  #   runs-on: ubuntu-latest
+  #   needs: [prepare, release-docker, release, cleanup]
+  #   if: failure()
+  #   permissions:
+  #     contents: read
+  #     issues: write
+  #   steps:
+  #     - uses: actions/checkout@v6
+  #       with:
+  #         persist-credentials: false
+  #     - uses: JasonEtco/create-an-issue@1b14a70e4d8dc185e5cc76d3bec9eab20257b2c5 # v2
+  #       env:
+  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  #         WORKFLOW_URL: |
+  #           ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  #       with:
+  #         update_existing: true
+  #         filename: .github/RELEASE_FAILURE_ISSUE_TEMPLATE.md
