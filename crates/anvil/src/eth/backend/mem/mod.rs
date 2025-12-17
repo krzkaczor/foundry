@@ -1317,10 +1317,12 @@ impl Backend {
     ) -> MinedBlockOutcome {
         let _mining_guard = self.mining.lock().await;
         trace!(target: "backend", "creating new block with {} transactions", pool_transactions.len());
+        trace!(target: "backend", "HERE 1");
 
         let (outcome, header, block_hash) = {
             let current_base_fee = self.base_fee();
             let current_excess_blob_gas_and_price = self.excess_blob_gas_and_price();
+            trace!(target: "backend", "HERE 2");
 
             let mut env = self.env.read().clone();
 
@@ -1331,6 +1333,7 @@ impl Backend {
             }
 
             let block_number = self.blockchain.storage.read().best_number.saturating_add(1);
+            trace!(target: "backend", "HERE 3");
 
             // increase block number for this block
             if is_arbitrum(env.evm_env.cfg_env.chain_id) {
@@ -1345,6 +1348,7 @@ impl Backend {
             env.evm_env.block_env.blob_excess_gas_and_price = current_excess_blob_gas_and_price;
 
             let best_hash = self.blockchain.storage.read().best_hash;
+            trace!(target: "backend", "HERE 4");
 
             let mut input = Vec::with_capacity(40);
             input.extend_from_slice(best_hash.as_slice());
@@ -1356,6 +1360,8 @@ impl Backend {
                 // store current state before executing all transactions
                 self.states.write().insert(best_hash, db);
             }
+
+            trace!(target: "backend", "HERE 5");
 
             let (executed_tx, block_hash) = {
                 let mut db = self.db.write().await;
@@ -1390,6 +1396,7 @@ impl Backend {
 
                 (executed_tx, block_hash)
             };
+            trace!(target: "backend", "HERE 6");
 
             // create the new block with the current timestamp
             let ExecutedTransactions { block, included, invalid } = executed_tx;
